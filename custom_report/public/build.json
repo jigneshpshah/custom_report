@@ -1,0 +1,5 @@
+{
+    "js/custom_report.min.js": [
+        "public/js/ag_report.js"
+    ]
+}
