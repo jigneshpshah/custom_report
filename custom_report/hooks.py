@@ -19,7 +19,7 @@ app_license = "MIT"
 # app_include_js = "/assets/custom_report/js/custom_report.js"
 
 app_include_js = [
-    "/assets/custom_report/js/lib/ag-grid-enterprise.min.js",
+    "/assets/custom_report/js/lib/ag-grid-community.min.js",
     "/assets/custom_report/js/ag_report.js"
 ]
 
