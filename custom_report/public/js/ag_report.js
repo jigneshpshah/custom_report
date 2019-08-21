@@ -24,6 +24,7 @@ frappe.standard_pages['ag-report'] = function () {
 
 
 frappe.views.AgReport = class AgReport extends frappe.views.BaseList {
+
     show() {
         this.init().then(() => this.load());
     }
@@ -34,7 +35,7 @@ frappe.views.AgReport = class AgReport extends frappe.views.BaseList {
         }
 
         let tasks = [
-            set_ag_license,
+            frappe.set_ag_license,
             this.setup_defaults,
             this.setup_page,
             this.setup_report_wrapper,
@@ -78,6 +79,7 @@ frappe.views.AgReport = class AgReport extends frappe.views.BaseList {
     }
 
     load_report() {
+
         this.page.clear_inner_toolbar();
         this.route = frappe.get_route();
         this.page_name = frappe.get_route_str();
@@ -85,6 +87,7 @@ frappe.views.AgReport = class AgReport extends frappe.views.BaseList {
         this.page_title = __(this.report_name);
         this.menu_items = this.get_menu_items();
         this.datatable = null;
+        this.$report.empty();
 
         frappe.run_serially([
             () => this.get_report_doc(),
@@ -224,12 +227,15 @@ frappe.views.AgReport = class AgReport extends frappe.views.BaseList {
     refresh() {
         this.toggle_message(true);
         let filters = this.get_filter_values(true);
+
         let query = frappe.utils.get_query_string(frappe.get_route_str());
 
         if (query) {
             let obj = frappe.utils.get_query_params(query);
             filters = Object.assign(filters || {}, obj);
         }
+
+        frappe.query_reports[this.report_name].cached_filters = filters || {};
 
         // only one refresh at a time
         if (this.last_ajax) {
@@ -264,6 +270,8 @@ frappe.views.AgReport = class AgReport extends frappe.views.BaseList {
             }
 
             this.show_footer_message();
+            this.report_settings.update_footer && this.report_settings.update_footer();
+
             frappe.hide_progress();
         });
     }
@@ -283,9 +291,14 @@ frappe.views.AgReport = class AgReport extends frappe.views.BaseList {
             data.splice(-1, 1);
         }
 
-        if (this.datatable) {
+        let always_recreate = (this.datatable && this.gridOptions.context && this.gridOptions.context.always_recreate) || false;
+
+        if (this.datatable && !always_recreate) {
             this.gridOptions.api.setRowData(data);
         } else {
+            if (this.datatable) {
+                this.datatable.destroy();
+            }
             let datatable_options = {
                 columns: this.columns,
                 data: data,
@@ -296,22 +309,28 @@ frappe.views.AgReport = class AgReport extends frappe.views.BaseList {
                 showTotalRow: this.raw_data.add_total_row,
                 hooks: {
                     columnTotal: frappe.utils.report_column_total
-                }
+                },
             };
-
-            if (this.report_settings.get_datatable_options) {
-                datatable_options = this.report_settings.get_datatable_options(datatable_options);
-            }
 
             this.gridOptions = {
                 columnDefs: datatable_options.columns,
                 onGridReady: function (event) {
-                    frappe.ag_report.gridOptions.api.setRowData(datatable_options.data)
-                }
+                    frappe.ag_report.gridOptions.api.setRowData(frappe.ag_report.data)
+                },
+                floatingFilter: true,
+                defaultColDef: { filter: 'agTextColumnFilter' }
             };
+
+            if (this.report_settings.set_gridOptions) {
+                this.report_settings.set_gridOptions(this.gridOptions);
+            }
+
             this.datatable = new agGrid.Grid(this.$report[0], this.gridOptions);
         }
-
+        // if (!this.datatable) {
+        // } else {
+        //     // this.gridOptions.api.setRowData(data);
+        // }
         if (this.report_settings.after_datatable_render) {
             this.report_settings.after_datatable_render(this.datatable);
         }
@@ -369,13 +388,59 @@ frappe.views.AgReport = class AgReport extends frappe.views.BaseList {
                 };
             }
 
-            return Object.assign(column, {
-                id: column.fieldname,
+            if (column.fieldtype && column.fieldtype.startsWith('Link/')) {
+                let option = column.fieldtype.replace('Link/', '');
+                column.fieldtype = 'Varchar';
+                column.cellRenderer = function (params) {
+                    return `<a href='#Form/${option}/${params.value}' target="_blank">${params.value}</a>`;
+                }
+            }
+
+            let agfilter_for_fieldtype = {
+                "Int": "agNumberColumnFilter",
+                "Float": "agNumberColumnFilter",
+                "Varchar": "agTextColumnFilter",
+                "Date": "agDateColumnFilter"
+            };
+
+            let agfieldtype_for_fieldtype = {
+                "Int": "numericColumn",
+                "Float": "numericColumn",
+                "Currency": "numericColumn",
+                "Date": "dateColumn"
+            };
+
+            // fix column types
+            if (!column.type && agfieldtype_for_fieldtype[column.fieldtype]) {
+                column.type = agfieldtype_for_fieldtype[column.fieldtype];
+            }
+            else if (column.type && ["Currency", "Float"].includes(column.type)) {
+                column.type = 'numericColumn';
+            }
+            else if (column.type && column.type.startsWith("Link")) {
+                delete column.type;
+            }
+
+            // fix column filters
+            column.filter = agfilter_for_fieldtype[column.fieldtype] || 'agTextColumnFilter';
+
+            if (column.valueGetter) {
+                column.valueGetter = eval(column.valueGetter)
+            }
+
+            let colDef = Object.assign(column, {
+                colId: column.fieldname,
+                field: column.fieldname, // for ag-grid
                 name: column.label,
                 headerName: column.label,
-                field: column.label,
-                width: parseInt(column.width) || null,
+                width: parseInt(column.width) || null
             });
+
+            // fix coldef properties not recognized by ag-grid, which log warnings in console 
+            ['label', 'name', 'fieldname', 'fieldtype'].forEach(e => delete colDef[e]);
+
+            return colDef;
+
         });
     }
 
@@ -384,7 +449,7 @@ frappe.views.AgReport = class AgReport extends frappe.views.BaseList {
             let row_obj = {};
             if (Array.isArray(row)) {
                 this.columns.forEach((column, i) => {
-                    row_obj[column.id] = row[i];
+                    row_obj[column.colId] = row[i];
                 });
 
                 return row_obj;
@@ -394,10 +459,10 @@ frappe.views.AgReport = class AgReport extends frappe.views.BaseList {
     }
 
     get_visible_columns() {
-        const visible_column_ids = this.datatable.datamanager.getColumns(true).map(col => col.id);
+        const visible_column_ids = this.datatable.datamanager.getColumns(true).map(col => col.colId);
 
         return visible_column_ids
-            .map(id => this.columns.find(col => col.id === id))
+            .map(id => this.columns.find(col => col.colId === id))
             .filter(Boolean);
     }
 
@@ -684,7 +749,7 @@ frappe.views.AgReport = class AgReport extends frappe.views.BaseList {
         let page_form = this.page.main.find('.page-form');
         this.$status = $(`<div class="form-message text-muted small"></div>`)
             .hide().insertAfter(page_form);
-        this.$report = $('<div id="appointments_grid" class="ag-theme-balham" style="height:300px;"></div>')
+        this.$report = $('<div id="ag-report-grid" class="ag-theme-balham" style="height:550px;"></div>')
             .appendTo(this.page.main);
         // this.$report = $('<div class="report-wrapper">').appendTo(this.page.main);
         this.$message = $(this.message_div('')).hide().appendTo(this.page.main);
@@ -700,7 +765,7 @@ frappe.views.AgReport = class AgReport extends frappe.views.BaseList {
 
     show_footer_message() {
         const message = "";
-        const execution_time_msg = __('Execution Time: {0} sec', [this.execution_time || 0.1]);
+        const execution_time_msg = __('{0} records in {1} sec', [(this.data || []).length, this.execution_time || 0.1]);
 
         this.page.footer.removeClass('hide').addClass('text-muted col-md-12')
             .html(`<span class="text-left col-md-6">${message}</span><span class="text-right col-md-6">${execution_time_msg}</span>`);
@@ -747,7 +812,7 @@ frappe.views.AgReport = class AgReport extends frappe.views.BaseList {
 
 }
 
-function set_ag_license() {
+frappe.set_ag_license = function () {
     if (agGrid.LicenseManager.licenseKey)
         return Promise.resolve();
     return frappe.call({
@@ -757,4 +822,12 @@ function set_ag_license() {
                 agGrid.LicenseManager.setLicenseKey(r.message);
         }
     });
+}
+
+frappe.set_redirect_to_ag_report = function () {
+    const href = window.location.href;
+    const regex = /query-report/g
+    if (href.match(regex))
+        window.location.href = href.replace(regex, 'ag-report');
+    // document.getElementById("ag-report-grid").style.height = "550px";
 }
